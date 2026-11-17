@@ -693,12 +693,30 @@ fn custom_build_updates_from_its_configured_source_checkout() {
     assert_eq!(error["error"]["kind"], "refused", "{error}");
     assert_eq!(error["error"]["message"], "source update failed: upstream conflicts", "{error}");
 
-    std::fs::write(&script, "echo 'error[E0425]: cannot find value' >&2\nexit 101\n").unwrap();
-    let (_, error) = s.err(&["--json", "update"]);
+    // Bytes that are not UTF-8 must not stop the reading (that would kill the build).
+    std::fs::write(
+        &script,
+        "printf 'compiling \\377\\n' >&2\nsleep 0.2\nyes noise | head -n 20000 >&2 || exit 3\nprintf 'merged=0\\nrebuilt=0\\n'\necho 'hc 9.8.7'\n",
+    )
+    .unwrap();
+    assert_eq!(s.json(&["update"])["now"], "hc 9.8.7");
+
+    std::fs::write(
+        &script,
+        "echo 'progress: Fetching origin/mian' >&2\necho 'error[E0425]: cannot find value' >&2\nexit 101\n",
+    )
+    .unwrap();
+    let out = s.hc(&["--json", "update"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let (step, error) = stderr.trim().split_once('\n').expect("a step line, then the error");
+    assert_eq!(step, "progress: Fetching origin/mian");
+    let error: serde_json::Value = serde_json::from_str(error).unwrap();
     assert!(
         error.to_string().contains("cannot find value"),
         "a failure without a verdict shows the build output: {error}"
     );
+    assert!(!error.to_string().contains("progress:"), "steps are not the error: {error}");
 }
 
 #[test]

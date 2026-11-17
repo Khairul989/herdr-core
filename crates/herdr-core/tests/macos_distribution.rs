@@ -536,6 +536,8 @@ fn source_update_changes_nothing_off_branch_on_a_dirty_tree_or_on_conflict() {
     let (s, repo) = source_fork();
     upstream_commit(&s, "news", "upstream\n");
 
+    let out = update_from_source(&s, &repo, &[("HC_SOURCE_UPSTREAM", "origin/mian")]);
+    assert!(failure(&out).contains("origin/mian does not exist"), "{out:?}");
     git(&repo, &["checkout", "-qb", "other-work"]);
     assert!(failure(&update_from_source(&s, &repo, &[])).contains("on other-work, not local"));
     git(&repo, &["checkout", "-q", "local"]);

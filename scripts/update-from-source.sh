@@ -30,7 +30,7 @@ git fetch --quiet "${upstream%%/*}" >&2 || fail "cannot fetch ${upstream%%/*}; n
 bin="${HC_INSTALL_DIR:-$HOME/.local/bin}"
 stamp="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core/source-update.head"
 from=$(git rev-parse HEAD)
-merged=$(git rev-list --count "HEAD..$upstream")
+merged=$(git rev-list --count "HEAD..$upstream") || fail "$upstream does not exist; check HC_SOURCE_UPSTREAM in $config"
 if [ "$merged" = 0 ]; then
   if [ "$(cat "$stamp" 2>/dev/null || true)" = "$from" ]; then
     progress "No new upstream commits"

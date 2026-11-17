@@ -52,7 +52,7 @@ pub(super) fn from_source(paths: &Paths) -> Result<Out, RpcError> {
 
 /// Runs the script, passing its `progress:` lines straight on to this hc's
 /// stderr (they exist only when the caller set HC_PROGRESS). Returns whether
-/// it succeeded, its stdout and its stderr lines.
+/// it succeeded, its stdout and its other stderr lines.
 fn run_source_update(script: &std::path::Path, dir: &str) -> std::io::Result<(bool, String, Vec<String>)> {
     use std::io::{BufRead, Read, Write};
     let mut child = std::process::Command::new("sh")
@@ -64,21 +64,26 @@ fn run_source_update(script: &std::path::Path, dir: &str) -> std::io::Result<(bo
         .spawn()?;
     let stderr = child.stderr.take().expect("piped stderr");
     let lines = std::thread::spawn(move || {
-        let mut kept = Vec::new();
-        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+        // Read to the end whatever the bytes: stopping early would close the
+        // pipe and kill the build with SIGPIPE.
+        let (mut kept, mut reader, mut buf) = (Vec::new(), std::io::BufReader::new(stderr), Vec::new());
+        while reader.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+            let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
+            buf.clear();
             if line.starts_with("progress: ") {
                 let mut err = std::io::stderr().lock();
                 let _ = writeln!(err, "{line}");
                 let _ = err.flush();
+            } else {
+                kept.push(line);
             }
-            kept.push(line);
         }
         kept
     });
-    let mut stdout = String::new();
-    child.stdout.take().expect("piped stdout").read_to_string(&mut stdout)?;
+    let mut stdout = Vec::new();
+    child.stdout.take().expect("piped stdout").read_to_end(&mut stdout)?;
     let status = child.wait()?;
-    Ok((status.success(), stdout, lines.join().unwrap_or_default()))
+    Ok((status.success(), String::from_utf8_lossy(&stdout).into_owned(), lines.join().unwrap_or_default()))
 }
 
 /// What the script reported: `key=value` lines, then the installed version.
