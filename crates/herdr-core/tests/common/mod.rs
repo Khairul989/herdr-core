@@ -72,6 +72,7 @@ impl Session {
         cmd.env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", &self.root)
+            .env("TMPDIR", test_tmp())
             .env("HC_SESSION", "test")
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
             .env("XDG_STATE_HOME", self.root.join("state"))

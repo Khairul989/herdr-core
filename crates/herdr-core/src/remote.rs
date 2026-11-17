@@ -601,7 +601,8 @@ fn apply(record: &mut Value, kind: &str, data: &Value) {
 const CALLS_BACK: &[&str] = &["terminal.send", "terminal.get", "terminal.read", "terminal.wait"];
 
 /// A call or a note from a machine we dialed. It reaches only terminals here
-/// that started work there: adding a machine gives it no say over the rest.
+/// that started work there, or explicit message-only grants. Adding a machine
+/// gives it no say over the rest.
 async fn from_machine(core: Arc<Core>, m: Machine, line: Arc<Line>, message: Value) {
     let method = message["method"].as_str().unwrap_or_default();
     let mut params = message["params"].clone();
@@ -609,7 +610,13 @@ async fn from_machine(core: Arc<Core>, m: Machine, line: Arc<Line>, message: Val
     let parent = params[key].as_str().and_then(|t| {
         let st = core.lock();
         let id = st.reg.resolve(crate::addr::local(t, &core.info.id, &core.info.name).ok()?).ok()?;
-        st.reg.terminals.get(&id).filter(|t| t.afar.contains(&m.id)).map(|_| id)
+        st.reg
+            .terminals
+            .get(&id)
+            .filter(|t| {
+                t.afar.contains(&m.id) || crate::reply_access::permits(t, &m.id, method, params["caller"].as_str())
+            })
+            .map(|_| id)
     });
     if method == "notes" {
         if let (Some(id), Some(text)) = (parent, params["text"].as_str()) {
@@ -621,7 +628,7 @@ async fn from_machine(core: Arc<Core>, m: Machine, line: Arc<Line>, message: Val
     let result = match parent.filter(|_| CALLS_BACK.contains(&method)) {
         None => Err(RpcError::new(
             "denied",
-            format!("{} may only reach the terminals here that started its own", m.name),
+            format!("{} may only reach parent terminals or explicitly granted message routes here", m.name),
             "",
         )),
         Some(id) => {
@@ -843,6 +850,9 @@ fn named(core: &Core, st: &State, prefix: &str) -> Result<Option<To>, RpcError> 
 /// addresses as they are seen there.
 pub fn route(core: &Core, method: &str, params: &Value) -> Result<Option<(To, Value)>, RpcError> {
     let st = core.lock();
+    if method == "terminal.send" {
+        crate::reply_access::check_sender(&st, params["caller"].as_str())?;
+    }
     let mut params = params.clone();
     let to = if matches!(
         method,

@@ -180,6 +180,24 @@ pub fn spawn_core_job(cmd: &mut std::process::Command, log: &std::path::Path) ->
     false
 }
 
+pub fn custom_build() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos_bundle::is_custom_build()
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn verify_custom_update_source(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if macos_bundle::is_custom_build() {
+        return macos_bundle::verify_custom_source(&update_source(path));
+    }
+    Ok(())
+}
+
 pub fn update_source(path: &std::path::Path) -> std::path::PathBuf {
     #[cfg(target_os = "macos")]
     if path.is_dir() {

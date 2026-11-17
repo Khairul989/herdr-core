@@ -112,6 +112,27 @@ default 60-second hold, but a parent configured above that
 can still outwait a child with a shorter limit. Sends to an added machine keep
 waiting while its line is alive.
 
+For an independently started remote agent to reply to this local terminal,
+grant message access here before sending it a task:
+
+```sh
+hc replies pve/t3                   # allow pve/t3 to send messages here
+hc send pve/t3 "Reply to the sender address in this message"
+hc replies pve/t3 --off             # revoke that route
+```
+
+A grant covers one remote core and terminal address and one live local terminal.
+It survives core restarts while that local terminal is live. It does not adopt
+the remote terminal or grant read, get, wait, keys or other control access.
+Without a grant, the existing parent callback rules apply. The local core needs
+the reply-access build; the remote core can use its existing `hc send`.
+Only grant a remote account you trust: its core supplies the caller address.
+
+A send with a missing or finished local sender fails with `stale_identity` before
+any text is delivered. Run Codex with `--no-daemon` in its own live terminal;
+a shared daemon can retain another session's terminal identity. Do not guess a
+replacement address or restart someone else's daemon. Plain-shell sends still work.
+
 Reports arrive tagged, for example:
 
 ```text
@@ -283,6 +304,19 @@ paths start at your current folder. Prefer explicit paths for remote work.
   one in a folder you can't write (Unix) the way it was installed.
 - On macOS, privacy requests from terminal programs belong to Herdr Core,
   not Herdr.app. Existing Herdr.app grants do not transfer to the core.
+- Source-installed macOS custom builds use a distinct, stable local bundle ID/team.
+  `just install` reads `~/.config/herdr-core/local-signing.env` (or under
+  `XDG_CONFIG_HOME`): `HC_MACOS_BUNDLE_ID`, `HC_MACOS_TEAM_ID` and an existing
+  keychain `HC_MACOS_SIGN_IDENTITY`; missing signing configuration fails instead
+  of installing ad-hoc. `just install` installs and restarts, not just builds.
+  Keep custom features current by merging upstream source, testing, and rebuilding
+  with the same configuration. A configured local build never downloads a vendor
+  binary on `hc update`, even `--force`: with `source-update.env` (`HC_SOURCE_DIR`,
+  `HC_SOURCE_BRANCH`) beside local-signing.env it merges upstream into that branch
+  and rebuilds via `scripts/update-from-source.sh`, otherwise it refuses. `update --from` accepts only a
+  signed bundle with that local ID/team and still restarts Core. Production release
+  authentication is unchanged. Retained old holders need a separately approved
+  transition; never kill or recreate the user's terminals without permission.
 - macOS installs keep the newest bundle at the fixed physical path
   `~/.local/share/herdr-core/active/Herdr Core.app`, selected by a `current`
   symlink, with `hc` and `herdr-core` links in

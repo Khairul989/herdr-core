@@ -110,7 +110,10 @@ methods! { Ctx<'_>;
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
     "terminal.send" => terminal_send, SendParams => SendResult,
         "Paste text and press Enter after a person sends or clears their draft (at most 60 s since their last key), otherwise after ~3 s of quiet. Keys pressed during delivery are held, then delivered. Refuses a blocked program unless `force`.",
-        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "invalid_params", "config", "cancelled"];
+        errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "invalid_params", "config", "cancelled", "stale_identity"];
+    "terminal.reply_access" => terminal_reply_access, ReplyAccessParams => ReplyAccessResult,
+        "Grant or revoke one remote terminal's permission to send messages to the calling live local terminal. Does not grant read, wait or control access, or change parent relationships.",
+        errors ["stale_identity", "invalid_params", "not_found", "machine_unknown"];
     "terminal.wait" => terminal_wait, WaitParams => crate::wait::WaitResult,
         "Wait until the program is not working (any word but working, or it exited/was lost); already not working returns at once. A program that never reported status is working until it exits. After a send from the same caller, waits for the turn that send started. A message to the caller also ends it: ended false, reason message, from = sender. A timeout is a check-in: ended false, current status.",
         errors ["not_found", "machine_unknown", "invalid_params", "needs_target", "config"];
@@ -480,6 +483,10 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
         resize_notifications: p.observe && p.resize_notifications,
         automatic_input: true,
     })
+}
+
+async fn terminal_reply_access(core: Ctx<'_>, p: ReplyAccessParams) -> Result<ReplyAccessResult, RpcError> {
+    crate::reply_access::set(core, p).await
 }
 
 async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcError> {

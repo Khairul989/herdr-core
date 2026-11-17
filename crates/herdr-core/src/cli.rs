@@ -53,6 +53,8 @@ enum Cmd {
     Keep(crate::api::KeepParams),
     /// Paste text into a terminal and press Enter (waits for a person's unfinished draft).
     Send(SendParams),
+    /// Grant one remote terminal permission to message this local terminal (--off revokes).
+    Replies(crate::api::ReplyAccessParams),
     /// Wait for your children (--children any) or one terminal; a message to you also ends it.
     Wait(WaitParams),
     /// Press named keys (enter, esc, up, ctrl+c, alt+x, f5, a...).
@@ -352,6 +354,17 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             let human = describe_wait(&r);
             Out { json: r, human }
         }
+        Cmd::Replies(mut p) => {
+            p.caller = client::terminal_id();
+            let r = call("terminal.reply_access", to(&p))?;
+            let action = if r["allowed"] == true { "allowed" } else { "revoked" };
+            let human = format!(
+                "{action} messages from {} to {}",
+                r["remote"].as_str().unwrap_or_default(),
+                r["terminal"].as_str().unwrap_or_default()
+            );
+            Out { json: r, human }
+        }
         Cmd::Send(mut p) => {
             p.caller = Some(caller());
             let r = call("terminal.send", to(&p))?;
@@ -565,6 +578,9 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
         }
         Cmd::Server { action: ServerCmd::Stop } => stop(&paths)?,
         Cmd::Update { from: None, version, force } => {
+            if crate::platform::custom_build() {
+                return Ok(Some(from_source(&paths)?));
+            }
             let this = format!("hc {}", env!("CARGO_PKG_VERSION"));
             if let Some(v) = &version
                 && !force
@@ -612,7 +628,16 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
                 out
             }
         }
-        Cmd::Update { from: Some(from), force, .. } => update(&paths, &from, force)?,
+        Cmd::Update { from: Some(from), force, .. } => {
+            crate::platform::verify_custom_update_source(&from).map_err(|e| {
+                RpcError::new(
+                    "refused",
+                    format!("invalid custom update source: {e}"),
+                    "use a signed local bundle with the configured bundle ID and team",
+                )
+            })?;
+            update(&paths, &from, force)?
+        }
         Cmd::Machine { action } => machine(&paths, action, call)?,
         Cmd::File { action } => match file(action, asked, call)? {
             Some(out) => out,
@@ -805,6 +830,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("label", "terminal.label"),
     ("keep", "terminal.keep"),
     ("send", "terminal.send"),
+    ("replies", "terminal.reply_access"),
     ("wait", "terminal.wait"),
     ("keys", "terminal.keys"),
     ("interrupt", "terminal.interrupt"),

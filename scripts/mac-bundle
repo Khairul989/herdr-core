@@ -9,4 +9,9 @@ version=${version#hc }
 mkdir -p "$app/Contents/MacOS"
 cp "$bin" "$app/Contents/MacOS/herdr-core"
 chmod 755 "$app/Contents/MacOS/herdr-core"
-sed "s/@VERSION@/$version/g" "$root/distribution/macos-Info.plist" > "$app/Contents/Info.plist"
+identifier=${HC_MACOS_BUNDLE_ID:-dev.herdr.core}
+case "$identifier" in
+  ''|*[!A-Za-z0-9.-]*|.*|*.|*..*) echo 'mac-bundle: invalid HC_MACOS_BUNDLE_ID' >&2; exit 1 ;;
+esac
+sed -e "s/@VERSION@/$version/g" -e "s#<string>dev\\.herdr\\.core</string>#<string>$identifier</string>#" \
+  "$root/distribution/macos-Info.plist" > "$app/Contents/Info.plist"

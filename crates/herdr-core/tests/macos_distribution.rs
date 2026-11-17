@@ -58,8 +58,88 @@ fn script(s: &Scratch, name: &str, args: impl IntoIterator<Item = impl AsRef<OsS
         .env("PATH", format!("{}:{}", s.root.join("tools").display(), std::env::var("PATH").unwrap()))
         .env("CALLS", s.root.join("calls"))
         .env_remove("APPLE_CERTIFICATE_P12")
-        .env_remove("APPLE_CERTIFICATE_PASSWORD");
+        .env_remove("APPLE_CERTIFICATE_PASSWORD")
+        .env_remove("HC_MACOS_BUNDLE_ID")
+        .env_remove("HC_MACOS_TEAM_ID")
+        .env_remove("HC_MACOS_SIGN_IDENTITY");
     cmd
+}
+
+#[test]
+fn macos_install_requires_local_signing_config_before_build() {
+    let s = Scratch::new();
+    stub(&s, "uname", "echo Darwin");
+    stub(&s, "cargo", "exit 73");
+    stub(&s, "codesign", "exit 74");
+    std::fs::create_dir_all(s.root.join("home")).unwrap();
+    let out = script(&s, "install-local.sh", std::iter::empty::<&str>())
+        .env("HOME", s.root.join("home"))
+        .env("HC_INSTALL_DIR", s.root.join("bin"))
+        .env("XDG_CONFIG_HOME", s.root.join("config"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let calls = std::fs::read_to_string(s.root.join("calls")).unwrap_or_default();
+    assert!(calls.lines().any(|line| line.starts_with("uname ")), "{calls}");
+    assert!(!calls.lines().any(|line| line.starts_with("cargo ") || line.starts_with("codesign ")), "{calls}");
+}
+
+#[test]
+fn macos_install_exports_isolated_local_signing_config_before_build() {
+    let s = Scratch::new();
+    stub(&s, "uname", "echo Darwin");
+    stub(&s, "nice", "shift 2; exec \"$@\"");
+    stub(
+        &s,
+        "cargo",
+        "printf 'config <%s> <%s> <%s>\\n' \"$HC_MACOS_BUNDLE_ID\" \"$HC_MACOS_TEAM_ID\" \"$HC_MACOS_SIGN_IDENTITY\" >> \"$CALLS\"; exit 73",
+    );
+    stub(&s, "codesign", "exit 74");
+    stub(&s, "install", "exit 75");
+    let config = s.root.join("config/herdr-core");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("local-signing.env"),
+        "HC_MACOS_BUNDLE_ID=dev.example.core\nHC_MACOS_TEAM_ID=ABCDE12345\nHC_MACOS_SIGN_IDENTITY='Developer ID Application: Example'\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(s.root.join("home")).unwrap();
+    let out = script(&s, "install-local.sh", std::iter::empty::<&str>())
+        .env("HOME", s.root.join("home"))
+        .env("HC_INSTALL_DIR", s.root.join("bin"))
+        .env("XDG_CONFIG_HOME", s.root.join("config"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(73), "{out:?}");
+    let calls = std::fs::read_to_string(s.root.join("calls")).unwrap();
+    assert_eq!(calls.lines().filter(|line| line.starts_with("cargo ")).count(), 1, "{calls}");
+    assert_eq!(
+        calls.lines().last(),
+        Some("config <dev.example.core> <ABCDE12345> <Developer ID Application: Example>"),
+        "{calls}"
+    );
+    assert!(!calls.lines().any(|line| line.starts_with("codesign ") || line.starts_with("install ")), "{calls}");
+}
+
+#[test]
+fn mac_bundle_uses_configured_identifier_and_rejects_invalid_identifier() {
+    let s = Scratch::new();
+    let bin = s.root.join("herdr-core");
+    std::fs::write(&bin, "#!/bin/sh\necho 'hc 0.1.21'\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let app = s.root.join("Herdr Core.app");
+    let out =
+        script(&s, "mac-bundle", [&bin, &app]).env("HC_MACOS_BUNDLE_ID", "dev.herdr.core.local").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
+    assert!(plist.contains("<string>dev.herdr.core.local</string>"), "{plist}");
+    assert!(!plist.contains("<string>dev.herdr.core</string>"), "{plist}");
+    assert!(plist.contains("<string>0.1.21</string>"), "{plist}");
+    let out = script(&s, "mac-bundle", [&bin, &s.root.join("invalid.app")])
+        .env("HC_MACOS_BUNDLE_ID", "dev.example.\"invalid")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
 }
 
 #[test]
@@ -77,6 +157,97 @@ fn mac_sign_uses_runtime_and_entitlements_even_for_ad_hoc_builds() {
     let lines: Vec<_> = calls.lines().collect();
     assert!(lines[0].ends_with("/Contents/MacOS/herdr-core"), "nested executable first: {calls}");
     assert!(lines[1].ends_with("/herdr-core"), "then bundle: {calls}");
+}
+
+#[test]
+fn mac_sign_uses_configured_keychain_identity_and_requirement() {
+    let s = Scratch::new();
+    stub(
+        &s,
+        "codesign",
+        "if [ \"$1\" = --force ]; then while [ $# -gt 0 ]; do if [ \"$1\" = --sign ]; then shift; [ \"$1\" = 'Developer ID Application: Example' ] || exit 1; fi; shift; done; fi",
+    );
+    std::fs::create_dir_all(s.root.join("herdr-core/Contents/MacOS")).unwrap();
+    let out = script(&s, "mac-sign", [s.root.join("herdr-core")])
+        .env("HC_MACOS_BUNDLE_ID", "dev.example.core")
+        .env("HC_MACOS_TEAM_ID", "ABCDE12345")
+        .env("HC_MACOS_SIGN_IDENTITY", "Developer ID Application: Example")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let calls = std::fs::read_to_string(s.root.join("calls")).unwrap();
+    let lines: Vec<_> = calls.lines().collect();
+    assert_eq!(lines.len(), 4, "{calls}");
+    for line in &lines[..2] {
+        for option in [
+            "--options runtime",
+            "--entitlements ",
+            "macos-entitlements.plist",
+            "--identifier dev.example.core",
+            "--timestamp",
+            "--sign Developer ID Application: Example",
+        ] {
+            assert!(line.contains(option), "{line}");
+        }
+    }
+    assert!(lines[0].ends_with("/Contents/MacOS/herdr-core"), "{calls}");
+    assert!(lines[1].ends_with("/herdr-core"), "{calls}");
+    assert!(lines[3].contains("--verify --strict -R =identifier \"dev.example.core\""), "{calls}");
+    for part in [
+        "anchor apple generic",
+        "certificate 1[field.1.2.840.113635.100.6.2.6] exists",
+        "certificate leaf[field.1.2.840.113635.100.6.1.13] exists",
+        "certificate leaf[subject.OU] = \"ABCDE12345\"",
+    ] {
+        assert!(lines[3].contains(part), "{calls}");
+    }
+}
+
+#[test]
+fn mac_sign_propagates_local_requirement_verification_failure() {
+    let s = Scratch::new();
+    stub(&s, "codesign", "case \"$*\" in *' -R '*) exit 1 ;; esac");
+    let out = script(&s, "mac-sign", [s.root.join("herdr-core")])
+        .env("HC_MACOS_BUNDLE_ID", "dev.example.core")
+        .env("HC_MACOS_TEAM_ID", "ABCDE12345")
+        .env("HC_MACOS_SIGN_IDENTITY", "signer")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(std::fs::read_to_string(s.root.join("calls")).unwrap().contains("--verify --strict -R"));
+}
+
+#[test]
+fn mac_sign_rejects_incomplete_or_invalid_local_configuration_before_signing() {
+    for (id, team, identity) in [
+        (Some(""), None, None),
+        (Some("dev.example.core"), None, None),
+        (None, Some("ABCDE12345"), None),
+        (None, None, Some("signer")),
+        (Some("dev.example.core"), Some("ABCDE12345"), None),
+        (Some("dev.example.core"), Some("ABCDE12345"), Some("")),
+        (Some(""), Some("ABCDE12345"), Some("signer")),
+        (Some("dev.herdr.core"), Some("ABCDE12345"), Some("signer")),
+        (Some("dev.example.\"core"), Some("ABCDE12345"), Some("signer")),
+        (Some("dev.example.core"), Some("abcde12345"), Some("signer")),
+        (Some("dev.example.core"), Some("ABCDE1234"), Some("signer")),
+        (Some("dev.example.core"), Some("ABCDE123456"), Some("signer")),
+        (Some("dev.example.core"), Some("ABCDE12345"), Some("-")),
+    ] {
+        let s = Scratch::new();
+        stub(&s, "codesign", "exit 0");
+        let mut cmd = script(&s, "mac-sign", [s.root.join("herdr-core")]);
+        for (key, value) in
+            [("HC_MACOS_BUNDLE_ID", id), ("HC_MACOS_TEAM_ID", team), ("HC_MACOS_SIGN_IDENTITY", identity)]
+        {
+            if let Some(value) = value {
+                cmd.env(key, value);
+            }
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(!s.root.join("calls").exists(), "codesign was invoked");
+    }
 }
 
 #[test]
@@ -229,5 +400,137 @@ fn gatekeeper_assessment_waits_for_a_fresh_ticket() {
         assert_eq!(out.status.success(), success, "{out:?}");
         let calls = std::fs::read_to_string(s.root.join("calls")).unwrap();
         assert_eq!(calls.lines().filter(|l| l.starts_with("spctl")).count(), if success { 3 } else { 40 }, "{calls}");
+    }
+}
+
+/// A fork fixture: an `origin` with master, a clone on branch `local` with one
+/// local commit, this repo's update-from-source.sh and a stand-in
+/// install-local.sh that installs a fake core (with `replies` unless NO_REPLIES).
+fn source_fork() -> (Scratch, PathBuf) {
+    let s = Scratch::new();
+    let upstream = s.root.join("upstream");
+    std::fs::create_dir(&upstream).unwrap();
+    git(&upstream, &["init", "-q", "-b", "master"]);
+    std::fs::write(upstream.join("shared"), "base\n").unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-qm", "base"]);
+    let repo = s.root.join("fork");
+    git(&s.root, &["clone", "-q", upstream.to_str().unwrap(), repo.to_str().unwrap()]);
+    git(&repo, &["checkout", "-qb", "local"]);
+    std::fs::create_dir(repo.join("scripts")).unwrap();
+    std::fs::copy(format!("{ROOT}/scripts/update-from-source.sh"), repo.join("scripts/update-from-source.sh")).unwrap();
+    let install = [
+        "printf 'install\\n' >> \"$CALLS\"",
+        "[ -z \"${FAIL_INSTALL:-}\" ] || exit 1",
+        "mkdir -p \"$HC_INSTALL_DIR\"",
+        "printf '#!/bin/sh\\ncase \"$1\" in --version) echo \"hc 9.9.9\" ;; replies) [ -z \"%s\" ] ;; esac\\n' \"${NO_REPLIES:-}\" > \"$HC_INSTALL_DIR/herdr-core\"",
+        "chmod +x \"$HC_INSTALL_DIR/herdr-core\"",
+    ];
+    std::fs::write(repo.join("scripts/install-local.sh"), install.join("\n") + "\n").unwrap();
+    std::fs::write(repo.join("patch"), "local\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "local patch"]);
+    let config = s.root.join("config/herdr-core");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("source-update.env"), "HC_SOURCE_BRANCH=local\n").unwrap();
+    (s, repo)
+}
+
+fn with_git_identity(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = with_git_identity(Command::new("git").arg("-C").arg(dir).args(args)).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn upstream_commit(s: &Scratch, file: &str, text: &str) {
+    let upstream = s.root.join("upstream");
+    std::fs::write(upstream.join(file), text).unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-qm", file]);
+}
+
+fn update_from_source(s: &Scratch, repo: &std::path::Path, extra: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = Command::new("sh");
+    cmd.arg(repo.join("scripts/update-from-source.sh"))
+        .env("HOME", s.root.join("home"))
+        .env("XDG_CONFIG_HOME", s.root.join("config"))
+        .env("XDG_STATE_HOME", s.root.join("state"))
+        .env("HC_INSTALL_DIR", s.root.join("bin"))
+        .env("CALLS", s.root.join("calls"))
+        .envs(extra.iter().copied());
+    with_git_identity(&mut cmd).output().unwrap()
+}
+
+fn installs(s: &Scratch) -> usize {
+    std::fs::read_to_string(s.root.join("calls")).unwrap_or_default().lines().filter(|l| *l == "install").count()
+}
+
+fn failure(out: &std::process::Output) -> String {
+    assert!(!out.status.success(), "{out:?}");
+    String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn source_update_merges_upstream_into_the_local_branch_then_installs_once() {
+    let (s, repo) = source_fork();
+    upstream_commit(&s, "news", "upstream\n");
+    let out = update_from_source(&s, &repo, &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hc 9.9.9");
+    git(&repo, &["merge-base", "--is-ancestor", "origin/master", "HEAD"]);
+    assert_eq!(git(&repo, &["symbolic-ref", "--short", "HEAD"]), "local");
+    assert!(repo.join("news").exists() && repo.join("patch").exists(), "upstream and the local patch both kept");
+    assert_eq!(installs(&s), 1);
+
+    // Nothing new upstream and this HEAD already installed: no rebuild.
+    assert!(update_from_source(&s, &repo, &[]).status.success());
+    assert_eq!(installs(&s), 1);
+    // Control: a new upstream commit does rebuild.
+    upstream_commit(&s, "more", "upstream\n");
+    assert!(update_from_source(&s, &repo, &[]).status.success());
+    assert_eq!(installs(&s), 2);
+}
+
+#[test]
+fn source_update_changes_nothing_off_branch_on_a_dirty_tree_or_on_conflict() {
+    let (s, repo) = source_fork();
+    upstream_commit(&s, "news", "upstream\n");
+
+    git(&repo, &["checkout", "-qb", "other-work"]);
+    assert!(failure(&update_from_source(&s, &repo, &[])).contains("on other-work, not local"));
+    git(&repo, &["checkout", "-q", "local"]);
+
+    std::fs::write(repo.join("patch"), "edited\n").unwrap();
+    assert!(failure(&update_from_source(&s, &repo, &[])).contains("commit or stash"));
+    git(&repo, &["checkout", "-q", "--", "patch"]);
+
+    std::fs::write(repo.join("shared"), "local change\n").unwrap();
+    git(&repo, &["commit", "-qam", "local edit"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    upstream_commit(&s, "shared", "upstream change\n");
+    assert!(failure(&update_from_source(&s, &repo, &[])).contains("conflicts"));
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+    assert!(!repo.join(".git/MERGE_HEAD").exists(), "the merge was aborted");
+    assert_eq!(git(&repo, &["status", "--porcelain", "--untracked-files=no"]), "");
+    assert_eq!(installs(&s), 0);
+}
+
+#[test]
+fn source_update_reports_a_failed_build_and_a_core_without_the_local_patch() {
+    for (var, expected) in [("FAIL_INSTALL", "installed core is unchanged"), ("NO_REPLIES", "local patch is missing")] {
+        let (s, repo) = source_fork();
+        upstream_commit(&s, "news", "upstream\n");
+        let out = update_from_source(&s, &repo, &[(var, "1")]);
+        assert!(failure(&out).contains(expected), "{var}: {out:?}");
+        assert_eq!(installs(&s), 1, "{var}");
+        assert!(!s.root.join("state/herdr-core/source-update.head").exists(), "{var}: never recorded as installed");
     }
 }

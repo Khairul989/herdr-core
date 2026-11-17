@@ -9,6 +9,61 @@ pub(super) fn version_of(path: &std::path::Path) -> Option<String> {
     (out.status.success() && v.starts_with("hc ")).then_some(v)
 }
 
+/// A custom build never takes a release (it would drop its local patches and
+/// identity). When `source-update.env` beside config.toml names its checkout
+/// (`HC_SOURCE_DIR`), that checkout's update-from-source.sh merges upstream,
+/// then builds, signs, installs and restarts; otherwise it is refused.
+pub(super) fn from_source(paths: &Paths) -> Result<Out, RpcError> {
+    let config = paths.config.with_file_name("source-update.env");
+    let dir = std::fs::read_to_string(&config).ok().and_then(|text| {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix("HC_SOURCE_DIR=").map(|v| v.trim_matches(['"', '\'']).to_owned()))
+    });
+    let Some(dir) = dir.filter(|d| !d.is_empty()) else {
+        return Err(RpcError::new(
+            "refused",
+            "ordinary updates would replace this custom build",
+            format!(
+                "merge upstream source, build, test and sign it, then run hc update --from with the signed local bundle; \
+                 or set HC_SOURCE_DIR and HC_SOURCE_BRANCH in {} so hc update does that",
+                config.display()
+            ),
+        ));
+    };
+    let script = std::path::Path::new(&dir).join("scripts/update-from-source.sh");
+    let out = std::process::Command::new("sh")
+        .arg(&script)
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            RpcError::new("refused", format!("cannot run {}: {e}", script.display()), "check HC_SOURCE_DIR")
+        })?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        // The script's own verdict when it gave one, else the end of the build output.
+        let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+        let why = match lines.iter().rev().find_map(|l| l.strip_prefix("update-from-source: ")) {
+            Some(verdict) => verdict.to_owned(),
+            None => lines[lines.len().saturating_sub(8)..].join("\n"),
+        };
+        return Err(RpcError::new(
+            "refused",
+            format!("source update failed: {why}"),
+            format!("fix it in {dir}, then run hc update again"),
+        ));
+    }
+    let now = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let human = format!("{now}, built from {dir}");
+    Ok(Out { json: json!({"now": now, "updated": true, "source": dir}), human })
+}
+
 /// A release name for `--version`: `0.1.4` (it goes into a URL).
 pub(super) fn release_version(s: &str) -> Result<String, String> {
     let parts: Vec<&str> = s.split('.').collect();

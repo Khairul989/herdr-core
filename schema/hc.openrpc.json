@@ -770,6 +770,25 @@
         ],
         "type": "object"
       },
+      "ReplyAccessResult": {
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "remote": {
+            "type": "string"
+          },
+          "terminal": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "terminal",
+          "remote",
+          "allowed"
+        ],
+        "type": "object"
+      },
       "RunResult": {
         "properties": {
           "address": {
@@ -2597,6 +2616,13 @@
             "kind": "cancelled"
           },
           "message": "cancelled"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "stale_identity"
+          },
+          "message": "stale_identity"
         }
       ],
       "name": "terminal.send",
@@ -2686,6 +2712,79 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/SendResult"
+        }
+      }
+    },
+    {
+      "description": "Grant or revoke one remote terminal's permission to send messages to the calling live local terminal. Does not grant read, wait or control access, or change parent relationships.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "stale_identity"
+          },
+          "message": "stale_identity"
+        },
+        {
+          "code": -32602,
+          "data": {
+            "kind": "invalid_params"
+          },
+          "message": "invalid_params"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_found"
+          },
+          "message": "not_found"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "machine_unknown"
+          },
+          "message": "machine_unknown"
+        }
+      ],
+      "name": "terminal.reply_access",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "Revoke message access instead of granting it.",
+          "name": "allow",
+          "required": true,
+          "schema": {
+            "description": "Revoke message access instead of granting it.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "The calling local terminal (HC_TERMINAL_ID).",
+          "name": "caller",
+          "required": false,
+          "schema": {
+            "description": "The calling local terminal (HC_TERMINAL_ID).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "Remote terminal allowed to message the calling local terminal: machine/t7.",
+          "name": "terminal",
+          "required": true,
+          "schema": {
+            "description": "Remote terminal allowed to message the calling local terminal: machine/t7.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ReplyAccessResult"
         }
       }
     },
