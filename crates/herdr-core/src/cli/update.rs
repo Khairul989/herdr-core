@@ -31,18 +31,12 @@ pub(super) fn from_source(paths: &Paths) -> Result<Out, RpcError> {
         ));
     };
     let script = std::path::Path::new(&dir).join("scripts/update-from-source.sh");
-    let out = std::process::Command::new("sh")
-        .arg(&script)
-        .current_dir(&dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| {
-            RpcError::new("refused", format!("cannot run {}: {e}", script.display()), "check HC_SOURCE_DIR")
-        })?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
+    let (ok, stdout, stderr) = run_source_update(&script, &dir).map_err(|e| {
+        RpcError::new("refused", format!("cannot run {}: {e}", script.display()), "check HC_SOURCE_DIR")
+    })?;
+    if !ok {
         // The script's own verdict when it gave one, else the end of the build output.
-        let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+        let lines: Vec<&str> = stderr.iter().map(String::as_str).filter(|l| !l.trim().is_empty()).collect();
         let why = match lines.iter().rev().find_map(|l| l.strip_prefix("update-from-source: ")) {
             Some(verdict) => verdict.to_owned(),
             None => lines[lines.len().saturating_sub(8)..].join("\n"),
@@ -53,15 +47,62 @@ pub(super) fn from_source(paths: &Paths) -> Result<Out, RpcError> {
             format!("fix it in {dir}, then run hc update again"),
         ));
     }
-    let now = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let human = format!("{now}, built from {dir}");
-    Ok(Out { json: json!({"now": now, "updated": true, "source": dir}), human })
+    Ok(source_outcome(&stdout, &dir))
+}
+
+/// Runs the script, passing its `progress:` lines straight on to this hc's
+/// stderr (they exist only when the caller set HC_PROGRESS). Returns whether
+/// it succeeded, its stdout and its other stderr lines.
+fn run_source_update(script: &std::path::Path, dir: &str) -> std::io::Result<(bool, String, Vec<String>)> {
+    use std::io::{BufRead, Read, Write};
+    let mut child = std::process::Command::new("sh")
+        .arg(script)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let stderr = child.stderr.take().expect("piped stderr");
+    let lines = std::thread::spawn(move || {
+        // Read to the end whatever the bytes: stopping early would close the
+        // pipe and kill the build with SIGPIPE.
+        let (mut kept, mut reader, mut buf) = (Vec::new(), std::io::BufReader::new(stderr), Vec::new());
+        while reader.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+            let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
+            buf.clear();
+            if line.starts_with("progress: ") {
+                let mut err = std::io::stderr().lock();
+                let _ = writeln!(err, "{line}");
+                let _ = err.flush();
+            } else {
+                kept.push(line);
+            }
+        }
+        kept
+    });
+    let mut stdout = Vec::new();
+    child.stdout.take().expect("piped stdout").read_to_end(&mut stdout)?;
+    let status = child.wait()?;
+    Ok((status.success(), String::from_utf8_lossy(&stdout).into_owned(), lines.join().unwrap_or_default()))
+}
+
+/// What the script reported: `key=value` lines, then the installed version.
+fn source_outcome(stdout: &str, dir: &str) -> Out {
+    let lines: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let now = lines.last().copied().unwrap_or_default().to_owned();
+    let field = |key: &str| lines.iter().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).unwrap_or_default();
+    let merged: u64 = field("merged").parse().unwrap_or(0);
+    let rebuilt = field("rebuilt") == "1";
+    let short = |sha: &str| sha.get(..7).unwrap_or(sha).to_owned();
+    let human = match (rebuilt, merged) {
+        (false, _) => format!("{now} is up to date: no new upstream commits ({})", short(field("to"))),
+        (true, 0) => format!("rebuilt {} from {dir}: now {now}", short(field("to"))),
+        (true, n) => {
+            format!("merged {n} upstream commit(s), {} → {}: now {now}", short(field("from")), short(field("to")))
+        }
+    };
+    let json = json!({"now": now, "updated": rebuilt, "merged": merged, "from": field("from"), "to": field("to"), "source": dir});
+    Out { json, human }
 }
 
 /// A release name for `--version`: `0.1.4` (it goes into a URL).

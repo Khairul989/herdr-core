@@ -119,6 +119,20 @@ fn macos_install_exports_isolated_local_signing_config_before_build() {
         "{calls}"
     );
     assert!(!calls.lines().any(|line| line.starts_with("codesign ") || line.starts_with("install ")), "{calls}");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("progress: "), "no steps unless asked: {out:?}");
+    let asked = script(&s, "install-local.sh", std::iter::empty::<&str>())
+        .env("HOME", s.root.join("home"))
+        .env("HC_INSTALL_DIR", s.root.join("bin"))
+        .env("XDG_CONFIG_HOME", s.root.join("config"))
+        .env("HC_PROGRESS", "1")
+        .output()
+        .unwrap();
+    let steps: Vec<String> = String::from_utf8_lossy(&asked.stderr)
+        .lines()
+        .filter(|l| l.starts_with("progress: "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(steps, ["progress: Building herdr-core (a few minutes)"], "a failed build reports no later step");
 }
 
 #[test]
@@ -482,16 +496,34 @@ fn failure(out: &std::process::Output) -> String {
 fn source_update_merges_upstream_into_the_local_branch_then_installs_once() {
     let (s, repo) = source_fork();
     upstream_commit(&s, "news", "upstream\n");
-    let out = update_from_source(&s, &repo, &[]);
+    let out = update_from_source(&s, &repo, &[("HC_PROGRESS", "1")]);
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hc 9.9.9");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!((lines[0], lines[3], lines[4]), ("merged=1", "rebuilt=1", "hc 9.9.9"), "{stdout}");
+    let steps: Vec<String> = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.starts_with("progress: "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "progress: Fetching origin/master",
+            "progress: Merging 1 new upstream commit(s) into local",
+            "progress: Checking the local patch"
+        ],
+    );
     git(&repo, &["merge-base", "--is-ancestor", "origin/master", "HEAD"]);
     assert_eq!(git(&repo, &["symbolic-ref", "--short", "HEAD"]), "local");
     assert!(repo.join("news").exists() && repo.join("patch").exists(), "upstream and the local patch both kept");
     assert_eq!(installs(&s), 1);
 
-    // Nothing new upstream and this HEAD already installed: no rebuild.
-    assert!(update_from_source(&s, &repo, &[]).status.success());
+    // Nothing new upstream and this HEAD already installed: no rebuild, and no progress unasked.
+    let out = update_from_source(&s, &repo, &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).lines().any(|l| l == "rebuilt=0"), "{out:?}");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("progress: "), "{out:?}");
     assert_eq!(installs(&s), 1);
     // Control: a new upstream commit does rebuild.
     upstream_commit(&s, "more", "upstream\n");
@@ -504,6 +536,8 @@ fn source_update_changes_nothing_off_branch_on_a_dirty_tree_or_on_conflict() {
     let (s, repo) = source_fork();
     upstream_commit(&s, "news", "upstream\n");
 
+    let out = update_from_source(&s, &repo, &[("HC_SOURCE_UPSTREAM", "origin/mian")]);
+    assert!(failure(&out).contains("origin/mian does not exist"), "{out:?}");
     git(&repo, &["checkout", "-qb", "other-work"]);
     assert!(failure(&update_from_source(&s, &repo, &[])).contains("on other-work, not local"));
     git(&repo, &["checkout", "-q", "local"]);

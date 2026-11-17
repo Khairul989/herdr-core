@@ -29,7 +29,11 @@ if [ "$os" = Darwin ]; then
   [ "$HC_MACOS_SIGN_IDENTITY" != - ] || { echo 'install-local: ad-hoc source installation is not allowed' >&2; exit 1; }
   export HC_MACOS_BUNDLE_ID HC_MACOS_TEAM_ID HC_MACOS_SIGN_IDENTITY
 fi
+# Steps for whoever asked (`hc update` from source sets HC_PROGRESS).
+progress() { [ -z "${HC_PROGRESS:-}" ] || echo "progress: $*" >&2; }
+progress "Building herdr-core (a few minutes)"
 nice -n 10 cargo build --release
+progress "Signing and installing"
 bin="${HC_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$bin"
 if [ "$os" = Darwin ]; then
@@ -43,4 +47,5 @@ else
   mv -f "$bin/herdr-core.new" "$bin/herdr-core"
 fi
 [ -e "$bin/hc" ] || [ -L "$bin/hc" ] || ln -s herdr-core "$bin/hc"
+progress "Restarting herdr-core (terminals keep running)"
 sh scripts/restart-core.sh "$bin/herdr-core"
