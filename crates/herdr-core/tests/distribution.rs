@@ -74,6 +74,9 @@ impl Releases {
                         .args(args)
                         .env_remove("APPLE_CERTIFICATE_P12")
                         .env_remove("APPLE_CERTIFICATE_PASSWORD")
+                        .env_remove("HC_MACOS_BUNDLE_ID")
+                        .env_remove("HC_MACOS_TEAM_ID")
+                        .env_remove("HC_MACOS_SIGN_IDENTITY")
                         .output()
                         .unwrap();
                     assert!(out.status.success(), "{script}: {out:?}");
@@ -610,6 +613,37 @@ fn the_install_script_marks_only_plain_release_downloads() {
 }
 
 #[test]
+fn custom_build_rejects_remote_updates_before_network_or_version_shortcut() {
+    if !cfg!(target_os = "macos") || option_env!("HC_MACOS_TEAM_ID").unwrap_or("").is_empty() {
+        return;
+    }
+    let mut s = Session::new();
+    let tools = s.root.join("tools");
+    let attempts = s.root.join("download-attempts");
+    std::fs::create_dir(&tools).unwrap();
+    let curl = tools.join("curl");
+    std::fs::write(&curl, "#!/bin/sh\nprintf 'attempt\\n' >> \"$HC_TEST_CURL_CALLS\"\nexit 73\n").unwrap();
+    std::fs::set_permissions(&curl, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.env.push(("PATH".into(), format!("{}:{}", tools.display(), std::env::var("PATH").unwrap())));
+    s.env.push(("HC_TEST_CURL_CALLS".into(), attempts.display().to_string()));
+    s.env.push(("HERDR_RELEASES_URL".into(), "http://127.0.0.1:1".into()));
+    // Positive control: the same environment can observe a download attempt.
+    assert_eq!(s.program(&curl).status().unwrap().code(), Some(73));
+    assert_eq!(std::fs::read_to_string(&attempts).unwrap(), "attempt\n");
+    std::fs::remove_file(&attempts).unwrap();
+    for args in
+        [vec!["--json", "update"], vec!["--json", "update", "--force"], vec!["--json", "update", "--version", "0.0.1"]]
+    {
+        let (_, error) = s.err(&args);
+        assert_eq!(error["error"]["kind"], "refused", "{args:?}: {error}");
+        let text = error.to_string();
+        assert!(text.contains("ordinary updates would replace this custom build"), "{text}");
+        assert!(text.contains("merge upstream source") && text.contains("--from"), "{text}");
+        assert!(!attempts.exists(), "custom update attempted a download: {args:?}");
+    }
+}
+
+#[test]
 fn hc_update_downloads_checks_and_swaps() {
     let mut s = Session::new();
     let r = Releases::new(&s, NEWER, &[&here()]);
@@ -692,7 +726,9 @@ fn a_machine_of_another_cpu_gets_the_released_build_for_it() {
     let t = run(&s, &["sh", "-c", &format!("{BIN} machine add odd; echo added-$?; sleep 100")]);
     wait_until("the offer", || text(&s, &t).contains("[Y/n]"));
     s.json(&["send", &t, "y"]);
-    wait_until("added", || text(&s, &t).contains("added-0"));
+    // A cold bundle install includes signature verification and atomic copies;
+    // it can finish successfully after the generic ten-second polling budget.
+    wait_until_for("added", std::time::Duration::from_secs(60), || text(&s, &t).contains("added-0"));
     assert!(odd.root.join(".local/bin/herdr-core").is_file());
     odd.bin = odd.root.join(".local/bin/herdr-core");
     drop(r);

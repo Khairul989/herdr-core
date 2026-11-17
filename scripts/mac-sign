@@ -12,6 +12,21 @@ sign_target() {
   codesign --force "${options[@]}" "$@" "$bin"
   codesign --verify --strict "$bin"
 }
+if [[ ${HC_MACOS_BUNDLE_ID+x} || ${HC_MACOS_TEAM_ID+x} || ${HC_MACOS_SIGN_IDENTITY+x} ]]; then
+  id=${HC_MACOS_BUNDLE_ID:-}
+  team=${HC_MACOS_TEAM_ID:-}
+  identity=${HC_MACOS_SIGN_IDENTITY:-}
+  if [[ ! $id =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ || $id == dev.herdr.core ||
+        ! $team =~ ^[A-Z0-9]{10}$ || -z $identity || $identity == - ]]; then
+    echo 'mac-sign: invalid or incomplete local signing configuration' >&2
+    exit 1
+  fi
+  options=(--options runtime --entitlements "$root/distribution/macos-entitlements.plist" --identifier "$id")
+  sign_target --timestamp --sign "$identity"
+  requirement="=identifier \"$id\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team\""
+  codesign --verify --strict -R "$requirement" "$bin"
+  exit 0
+fi
 if [[ -z ${APPLE_CERTIFICATE_P12:-} && -z ${APPLE_CERTIFICATE_PASSWORD:-} ]]; then
   sign_target --sign -
   exit 0

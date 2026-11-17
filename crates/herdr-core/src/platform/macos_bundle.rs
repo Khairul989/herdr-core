@@ -24,6 +24,48 @@ fn checked(program: &str, args: &[&std::ffi::OsStr]) -> io::Result<()> {
     }
 }
 
+fn custom_build(team: &str) -> bool {
+    !team.is_empty()
+}
+
+pub fn is_custom_build() -> bool {
+    custom_build(option_env!("HC_MACOS_TEAM_ID").unwrap_or(""))
+}
+
+fn local_requirement(id: &str, team: &str, local: bool) -> Option<String> {
+    if !local
+        || !custom_build(team)
+        || id == "dev.herdr.core"
+        || !id.contains('.')
+        || id.split('.').any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        || team.len() != 10
+        || !team.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!(
+        "=identifier \"{id}\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"{team}\""
+    ))
+}
+
+fn compiled_local_requirement(local: bool) -> Option<String> {
+    local_requirement(
+        option_env!("HC_MACOS_BUNDLE_ID").unwrap_or("dev.herdr.core"),
+        option_env!("HC_MACOS_TEAM_ID").unwrap_or(""),
+        local,
+    )
+}
+
+pub fn verify_custom_source(path: &Path) -> io::Result<()> {
+    let root = bundle(path).ok_or_else(|| io::Error::other("source is not a core app bundle"))?;
+    let requirement = compiled_local_requirement(true)
+        .ok_or_else(|| io::Error::other("custom build has no valid configured signing team and bundle ID"))?;
+    checked(
+        "/usr/bin/codesign",
+        &["--verify".as_ref(), "--strict".as_ref(), "-R".as_ref(), requirement.as_ref(), root.as_os_str()],
+    )
+}
+
 pub fn verify(path: &Path, local: bool) -> io::Result<()> {
     let verify = |requirement: &str| {
         checked(
@@ -32,6 +74,11 @@ pub fn verify(path: &Path, local: bool) -> io::Result<()> {
         )
     };
     if verify(REQUIREMENT).is_ok() {
+        return Ok(());
+    }
+    if let Some(requirement) = compiled_local_requirement(local)
+        && verify(&requirement).is_ok()
+    {
         return Ok(());
     }
     // Explicit local builds can be ad-hoc, but another team's signature is never ours.
@@ -271,6 +318,9 @@ pub fn install(source: &Path, dest: &Path, works: impl Fn(&Path) -> bool) -> io:
     let result = (|| {
         checked("/usr/bin/ditto", &[source.as_os_str(), staged.as_os_str()])?;
         verify(&staged, true)?;
+        if is_custom_build() {
+            verify_custom_source(&staged.join(EXECUTABLE))?;
+        }
         if !works(&staged.join(EXECUTABLE)) {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -374,6 +424,38 @@ pub fn source_is_bundle(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_requirement_is_limited_to_the_configured_custom_identity() {
+        assert!(!custom_build(""));
+        assert!(custom_build("ABCDE12345"));
+        assert!(local_requirement("dev.example.core", "", true).is_none());
+        assert!(local_requirement("dev.herdr.core", "ABCDE12345", true).is_none());
+        assert!(local_requirement("dev.example.core", "ABCDE12345", false).is_none());
+        assert!(local_requirement("dev.example.\"core", "ABCDE12345", true).is_none());
+        assert!(local_requirement("dev.example.core", "TEAM\"123", true).is_none());
+        for id in ["example", ".dev.example", "dev.example.", "dev..example"] {
+            assert!(local_requirement(id, "ABCDE12345", true).is_none(), "{id}");
+        }
+        for team in ["TEAM123", "abcde12345", "ABCDE123456"] {
+            assert!(local_requirement("dev.example.core", team, true).is_none(), "{team}");
+        }
+        let requirement = local_requirement("dev.example.core", "ABCDE12345", true).unwrap();
+        assert!(requirement.contains("identifier \"dev.example.core\""));
+        assert!(requirement.contains("anchor apple generic"));
+        assert!(requirement.contains("certificate 1[field.1.2.840.113635.100.6.2.6]"));
+        assert!(requirement.contains("certificate leaf[field.1.2.840.113635.100.6.1.13]"));
+        assert!(requirement.contains("certificate leaf[subject.OU] = \"ABCDE12345\""));
+    }
+
+    #[test]
+    fn configured_native_bundle_is_local_not_a_vendor_release() {
+        let Some(path) = std::env::var_os("HC_TEST_LOCAL_BUNDLE") else { return };
+        assert!(is_custom_build(), "native bundle proof requires a custom build");
+        let path = Path::new(&path);
+        verify(path, true).expect("configured local bundle must be trusted locally");
+        assert!(verify(path, false).is_err(), "custom bundle must not be trusted as a vendor release");
+    }
+
     #[test]
     fn the_legacy_notice_reaches_stderr_once_even_before_the_core_has_started() {
         let root = std::env::temp_dir().join(format!("hc-notice-{}", super::super::random_hex()));

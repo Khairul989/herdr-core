@@ -578,6 +578,13 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
         }
         Cmd::Server { action: ServerCmd::Stop } => stop(&paths)?,
         Cmd::Update { from: None, version, force } => {
+            if crate::platform::custom_build() {
+                return Err(RpcError::new(
+                    "refused",
+                    "ordinary updates would replace this custom build",
+                    "merge upstream source, build, test and sign it, then run hc update --from with the signed local bundle",
+                ));
+            }
             let this = format!("hc {}", env!("CARGO_PKG_VERSION"));
             if let Some(v) = &version
                 && !force
@@ -625,7 +632,16 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
                 out
             }
         }
-        Cmd::Update { from: Some(from), force, .. } => update(&paths, &from, force)?,
+        Cmd::Update { from: Some(from), force, .. } => {
+            crate::platform::verify_custom_update_source(&from).map_err(|e| {
+                RpcError::new(
+                    "refused",
+                    format!("invalid custom update source: {e}"),
+                    "use a signed local bundle with the configured bundle ID and team",
+                )
+            })?;
+            update(&paths, &from, force)?
+        }
         Cmd::Machine { action } => machine(&paths, action, call)?,
         Cmd::File { action } => match file(action, asked, call)? {
             Some(out) => out,

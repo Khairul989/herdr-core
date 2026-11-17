@@ -55,6 +55,51 @@ to inherited responsibility with a diagnostic. Existing pre-upgrade holders
 cannot be repaired by restarting the core: users must recreate those terminals
 if privacy access is broken. Updates never kill them automatically.
 
+## Source-built local Core
+
+macOS `just install` requires a local signing configuration instead of silently
+installing an ad-hoc build under the release's identity. Select an existing
+Developer ID Application identity with `security find-identity -v -p codesigning`,
+and put the following nonsecret values in
+`${XDG_CONFIG_HOME:-$HOME/.config}/herdr-core/local-signing.env`:
+
+```sh
+HC_MACOS_BUNDLE_ID=dev.herdr.core.local
+HC_MACOS_TEAM_ID=ABCDEFGHIJ
+HC_MACOS_SIGN_IDENTITY='<Developer-ID fingerprint from your keychain>'
+```
+
+Use your certificate's actual 10-character team ID and fingerprint. The local
+bundle ID must differ from `dev.herdr.core`; keep both it and the signing team
+stable across rebuilds. Explicit environment configuration takes precedence
+over the file, but must supply all three values. Incomplete configuration or a
+mismatched signing identity fails; it never falls back to ad-hoc installation.
+No private key export or temporary keychain is needed for this path. Production
+release signing and downloaded-release authentication remain vendor-only.
+
+The installer exports the configuration before compiling so the embedded plist,
+outer bundle, signature and compiled verification policy agree. `just install`
+**installs and restarts Core**, so do not use it merely to stage a build when live
+session changes have not been approved. For staging, export the same three
+values, build with `cargo build --release --locked`, then run `scripts/mac-bundle`
+and `scripts/mac-sign` against a new output bundle outside the live installation.
+
+Keep local features while staying current by fetching upstream, merging its
+source changes into the local branch, testing, then rebuilding and signing with
+the same configuration. This is a manual source-update workflow, not automatic
+or conflict-free synchronization. A configured local binary refuses ordinary
+`hc update` (including `--force`) before downloading a vendor binary, because
+that would discard the custom source and change its signing identity. Use
+`hc update --from '/path/to/Herdr Core.app'` only with a bundle built and signed
+for the same local ID/team; that command installs and restarts Core too.
+
+A distinct local identity allows retained vendor-signed holders to keep their
+own consent rather than overwrite the local build's consent. Previously
+installed ad-hoc holders still need a separately approved transition/recreation;
+neither signing a new bundle nor restarting only the daemon repairs them.
+Native signing and isolated installation tests do not prove lasting TCC consent:
+verify repeated ordinary access and fresh privacy events after activation.
+
 ## Verification
 
 The tag release is the Developer ID/notarization check. If signing,

@@ -304,6 +304,17 @@ paths start at your current folder. Prefer explicit paths for remote work.
   one in a folder you can't write (Unix) the way it was installed.
 - On macOS, privacy requests from terminal programs belong to Herdr Core,
   not Herdr.app. Existing Herdr.app grants do not transfer to the core.
+- Source-installed macOS custom builds use a distinct, stable local bundle ID/team.
+  `just install` reads `~/.config/herdr-core/local-signing.env` (or under
+  `XDG_CONFIG_HOME`): `HC_MACOS_BUNDLE_ID`, `HC_MACOS_TEAM_ID` and an existing
+  keychain `HC_MACOS_SIGN_IDENTITY`; missing signing configuration fails instead
+  of installing ad-hoc. `just install` installs and restarts, not just builds.
+  Keep custom features current by merging upstream source, testing, and rebuilding
+  with the same configuration. A configured local build refuses vendor-binary
+  `hc update`, even `--force`, before downloading; `update --from` accepts only a
+  signed bundle with that local ID/team and still restarts Core. Production release
+  authentication is unchanged. Retained old holders need a separately approved
+  transition; never kill or recreate the user's terminals without permission.
 - macOS installs keep the newest bundle at the fixed physical path
   `~/.local/share/herdr-core/active/Herdr Core.app`, selected by a `current`
   symlink, with `hc` and `herdr-core` links in
