@@ -86,10 +86,24 @@ and `scripts/mac-sign` against a new output bundle outside the live installation
 
 Keep local features while staying current by fetching upstream, merging its
 source changes into the local branch, testing, then rebuilding and signing with
-the same configuration. This is a manual source-update workflow, not automatic
-or conflict-free synchronization. A configured local binary refuses ordinary
-`hc update` (including `--force`) before downloading a vendor binary, because
-that would discard the custom source and change its signing identity. Use
+the same configuration. A configured local binary never downloads a vendor
+binary on `hc update` (including `--force`), because that would discard the
+custom source and change its signing identity. Instead, when
+`${XDG_CONFIG_HOME:-$HOME/.config}/herdr-core/source-update.env` names the
+checkout, `hc update` (and Herdr's Update button) runs that checkout's
+`scripts/update-from-source.sh`:
+
+```sh
+HC_SOURCE_DIR=/path/to/herdr-core
+HC_SOURCE_BRANCH=the-local-branch
+# HC_SOURCE_UPSTREAM=origin/master
+```
+
+It refuses unless the checkout is on that branch with no uncommitted changes,
+fetches and merges upstream (aborting the merge on a conflict), runs
+`scripts/install-local.sh`, and fails if the new core lacks `hc replies` (the
+local patch). It runs no tests: merge by hand and run the suite when upstream
+touches the patched code. Without that file the update is refused. Use
 `hc update --from '/path/to/Herdr Core.app'` only with a bundle built and signed
 for the same local ID/team; that command installs and restarts Core too.
 

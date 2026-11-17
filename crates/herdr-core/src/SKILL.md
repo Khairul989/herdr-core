@@ -310,8 +310,10 @@ paths start at your current folder. Prefer explicit paths for remote work.
   keychain `HC_MACOS_SIGN_IDENTITY`; missing signing configuration fails instead
   of installing ad-hoc. `just install` installs and restarts, not just builds.
   Keep custom features current by merging upstream source, testing, and rebuilding
-  with the same configuration. A configured local build refuses vendor-binary
-  `hc update`, even `--force`, before downloading; `update --from` accepts only a
+  with the same configuration. A configured local build never downloads a vendor
+  binary on `hc update`, even `--force`: with `source-update.env` (`HC_SOURCE_DIR`,
+  `HC_SOURCE_BRANCH`) beside local-signing.env it merges upstream into that branch
+  and rebuilds via `scripts/update-from-source.sh`, otherwise it refuses. `update --from` accepts only a
   signed bundle with that local ID/team and still restarts Core. Production release
   authentication is unchanged. Retained old holders need a separately approved
   transition; never kill or recreate the user's terminals without permission.

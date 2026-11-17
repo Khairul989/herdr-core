@@ -402,3 +402,135 @@ fn gatekeeper_assessment_waits_for_a_fresh_ticket() {
         assert_eq!(calls.lines().filter(|l| l.starts_with("spctl")).count(), if success { 3 } else { 40 }, "{calls}");
     }
 }
+
+/// A fork fixture: an `origin` with master, a clone on branch `local` with one
+/// local commit, this repo's update-from-source.sh and a stand-in
+/// install-local.sh that installs a fake core (with `replies` unless NO_REPLIES).
+fn source_fork() -> (Scratch, PathBuf) {
+    let s = Scratch::new();
+    let upstream = s.root.join("upstream");
+    std::fs::create_dir(&upstream).unwrap();
+    git(&upstream, &["init", "-q", "-b", "master"]);
+    std::fs::write(upstream.join("shared"), "base\n").unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-qm", "base"]);
+    let repo = s.root.join("fork");
+    git(&s.root, &["clone", "-q", upstream.to_str().unwrap(), repo.to_str().unwrap()]);
+    git(&repo, &["checkout", "-qb", "local"]);
+    std::fs::create_dir(repo.join("scripts")).unwrap();
+    std::fs::copy(format!("{ROOT}/scripts/update-from-source.sh"), repo.join("scripts/update-from-source.sh")).unwrap();
+    let install = [
+        "printf 'install\\n' >> \"$CALLS\"",
+        "[ -z \"${FAIL_INSTALL:-}\" ] || exit 1",
+        "mkdir -p \"$HC_INSTALL_DIR\"",
+        "printf '#!/bin/sh\\ncase \"$1\" in --version) echo \"hc 9.9.9\" ;; replies) [ -z \"%s\" ] ;; esac\\n' \"${NO_REPLIES:-}\" > \"$HC_INSTALL_DIR/herdr-core\"",
+        "chmod +x \"$HC_INSTALL_DIR/herdr-core\"",
+    ];
+    std::fs::write(repo.join("scripts/install-local.sh"), install.join("\n") + "\n").unwrap();
+    std::fs::write(repo.join("patch"), "local\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "local patch"]);
+    let config = s.root.join("config/herdr-core");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("source-update.env"), "HC_SOURCE_BRANCH=local\n").unwrap();
+    (s, repo)
+}
+
+fn with_git_identity(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = with_git_identity(Command::new("git").arg("-C").arg(dir).args(args)).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn upstream_commit(s: &Scratch, file: &str, text: &str) {
+    let upstream = s.root.join("upstream");
+    std::fs::write(upstream.join(file), text).unwrap();
+    git(&upstream, &["add", "."]);
+    git(&upstream, &["commit", "-qm", file]);
+}
+
+fn update_from_source(s: &Scratch, repo: &std::path::Path, extra: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = Command::new("sh");
+    cmd.arg(repo.join("scripts/update-from-source.sh"))
+        .env("HOME", s.root.join("home"))
+        .env("XDG_CONFIG_HOME", s.root.join("config"))
+        .env("XDG_STATE_HOME", s.root.join("state"))
+        .env("HC_INSTALL_DIR", s.root.join("bin"))
+        .env("CALLS", s.root.join("calls"))
+        .envs(extra.iter().copied());
+    with_git_identity(&mut cmd).output().unwrap()
+}
+
+fn installs(s: &Scratch) -> usize {
+    std::fs::read_to_string(s.root.join("calls")).unwrap_or_default().lines().filter(|l| *l == "install").count()
+}
+
+fn failure(out: &std::process::Output) -> String {
+    assert!(!out.status.success(), "{out:?}");
+    String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn source_update_merges_upstream_into_the_local_branch_then_installs_once() {
+    let (s, repo) = source_fork();
+    upstream_commit(&s, "news", "upstream\n");
+    let out = update_from_source(&s, &repo, &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hc 9.9.9");
+    git(&repo, &["merge-base", "--is-ancestor", "origin/master", "HEAD"]);
+    assert_eq!(git(&repo, &["symbolic-ref", "--short", "HEAD"]), "local");
+    assert!(repo.join("news").exists() && repo.join("patch").exists(), "upstream and the local patch both kept");
+    assert_eq!(installs(&s), 1);
+
+    // Nothing new upstream and this HEAD already installed: no rebuild.
+    assert!(update_from_source(&s, &repo, &[]).status.success());
+    assert_eq!(installs(&s), 1);
+    // Control: a new upstream commit does rebuild.
+    upstream_commit(&s, "more", "upstream\n");
+    assert!(update_from_source(&s, &repo, &[]).status.success());
+    assert_eq!(installs(&s), 2);
+}
+
+#[test]
+fn source_update_changes_nothing_off_branch_on_a_dirty_tree_or_on_conflict() {
+    let (s, repo) = source_fork();
+    upstream_commit(&s, "news", "upstream\n");
+
+    git(&repo, &["checkout", "-qb", "other-work"]);
+    assert!(failure(&update_from_source(&s, &repo, &[])).contains("on other-work, not local"));
+    git(&repo, &["checkout", "-q", "local"]);
+
+    std::fs::write(repo.join("patch"), "edited\n").unwrap();
+    assert!(failure(&update_from_source(&s, &repo, &[])).contains("commit or stash"));
+    git(&repo, &["checkout", "-q", "--", "patch"]);
+
+    std::fs::write(repo.join("shared"), "local change\n").unwrap();
+    git(&repo, &["commit", "-qam", "local edit"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    upstream_commit(&s, "shared", "upstream change\n");
+    assert!(failure(&update_from_source(&s, &repo, &[])).contains("conflicts"));
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+    assert!(!repo.join(".git/MERGE_HEAD").exists(), "the merge was aborted");
+    assert_eq!(git(&repo, &["status", "--porcelain", "--untracked-files=no"]), "");
+    assert_eq!(installs(&s), 0);
+}
+
+#[test]
+fn source_update_reports_a_failed_build_and_a_core_without_the_local_patch() {
+    for (var, expected) in [("FAIL_INSTALL", "installed core is unchanged"), ("NO_REPLIES", "local patch is missing")] {
+        let (s, repo) = source_fork();
+        upstream_commit(&s, "news", "upstream\n");
+        let out = update_from_source(&s, &repo, &[(var, "1")]);
+        assert!(failure(&out).contains(expected), "{var}: {out:?}");
+        assert_eq!(installs(&s), 1, "{var}");
+        assert!(!s.root.join("state/herdr-core/source-update.head").exists(), "{var}: never recorded as installed");
+    }
+}

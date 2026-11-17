@@ -579,11 +579,7 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
         Cmd::Server { action: ServerCmd::Stop } => stop(&paths)?,
         Cmd::Update { from: None, version, force } => {
             if crate::platform::custom_build() {
-                return Err(RpcError::new(
-                    "refused",
-                    "ordinary updates would replace this custom build",
-                    "merge upstream source, build, test and sign it, then run hc update --from with the signed local bundle",
-                ));
+                return Ok(Some(from_source(&paths)?));
             }
             let this = format!("hc {}", env!("CARGO_PKG_VERSION"));
             if let Some(v) = &version

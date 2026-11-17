@@ -644,6 +644,42 @@ fn custom_build_rejects_remote_updates_before_network_or_version_shortcut() {
 }
 
 #[test]
+fn custom_build_updates_from_its_configured_source_checkout() {
+    if !cfg!(target_os = "macos") || option_env!("HC_MACOS_TEAM_ID").unwrap_or("").is_empty() {
+        return;
+    }
+    let s = Session::new();
+    let source = s.root.join("source");
+    std::fs::create_dir_all(source.join("scripts")).unwrap();
+    let script = source.join("scripts/update-from-source.sh");
+    let config = s.root.join("config/herdr-core");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("source-update.env"), format!("HC_SOURCE_DIR='{}'\n", source.display())).unwrap();
+
+    std::fs::write(&script, "pwd > ran\necho building >&2\necho 'hc 9.8.7'\n").unwrap();
+    for args in [vec!["update"], vec!["update", "--version", "0.0.1"]] {
+        let up = s.json(&args);
+        assert_eq!((up["now"].as_str(), up["updated"].as_bool()), (Some("hc 9.8.7"), Some(true)), "{args:?}: {up}");
+        let ran = std::fs::read_to_string(source.join("ran")).unwrap();
+        assert_eq!(std::fs::canonicalize(ran.trim()).unwrap(), std::fs::canonicalize(&source).unwrap());
+        std::fs::remove_file(source.join("ran")).unwrap();
+    }
+
+    std::fs::write(&script, "echo 'cargo noise' >&2\necho 'update-from-source: upstream conflicts' >&2\nexit 1\n")
+        .unwrap();
+    let (_, error) = s.err(&["--json", "update"]);
+    assert_eq!(error["error"]["kind"], "refused", "{error}");
+    assert_eq!(error["error"]["message"], "source update failed: upstream conflicts", "{error}");
+
+    std::fs::write(&script, "echo 'error[E0425]: cannot find value' >&2\nexit 101\n").unwrap();
+    let (_, error) = s.err(&["--json", "update"]);
+    assert!(
+        error.to_string().contains("cannot find value"),
+        "a failure without a verdict shows the build output: {error}"
+    );
+}
+
+#[test]
 fn hc_update_downloads_checks_and_swaps() {
     let mut s = Session::new();
     let r = Releases::new(&s, NEWER, &[&here()]);
