@@ -503,6 +503,25 @@ pub struct SendParams {
     pub caller: Option<String>,
 }
 
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ReplyAccessParams {
+    /// Remote terminal allowed to message the calling local terminal: machine/t7.
+    pub terminal: String,
+    /// Revoke message access instead of granting it.
+    #[arg(long = "off", action = clap::ArgAction::SetFalse, default_value_t = true)]
+    pub allow: bool,
+    /// The calling local terminal (HC_TERMINAL_ID).
+    #[arg(skip)]
+    pub caller: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ReplyAccessResult {
+    pub terminal: String,
+    pub remote: String,
+    pub allowed: bool,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct SendResult {
     /// The program's status word when the text went in (null: it never said).

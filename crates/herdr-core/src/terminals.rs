@@ -138,6 +138,9 @@ pub struct Terminal {
     /// Machines (core ids) it started work on: they may call back to it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub afar: std::collections::BTreeSet<String>,
+    /// Remote core id / terminal id pairs explicitly allowed to send messages here.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub reply_from: std::collections::BTreeSet<String>,
 }
 
 impl Terminal {
@@ -308,6 +311,7 @@ impl Registry {
                 paste_gap_ms: new.template.as_ref().and_then(|t| t.paste_gap_ms),
                 foreground: None,
                 afar: Default::default(),
+                reply_from: Default::default(),
                 template: new.template.map(|t| t.name),
                 first_message: None,
                 holder: None,
@@ -421,6 +425,7 @@ const PRIVATE: &[&str] = &[
     "full_screen",
     "win32_input",
     "afar",
+    "reply_from",
     "last_cwd",
     "restart_env",
     "restart_after_ms",

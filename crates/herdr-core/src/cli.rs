@@ -53,6 +53,8 @@ enum Cmd {
     Keep(crate::api::KeepParams),
     /// Paste text into a terminal and press Enter (waits for a person's unfinished draft).
     Send(SendParams),
+    /// Grant one remote terminal permission to message this local terminal (--off revokes).
+    Replies(crate::api::ReplyAccessParams),
     /// Wait for your children (--children any) or one terminal; a message to you also ends it.
     Wait(WaitParams),
     /// Press named keys (enter, esc, up, ctrl+c, alt+x, f5, a...).
@@ -350,6 +352,17 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             p.caller = Some(caller());
             let r = call("terminal.wait", to(&p))?;
             let human = describe_wait(&r);
+            Out { json: r, human }
+        }
+        Cmd::Replies(mut p) => {
+            p.caller = client::terminal_id();
+            let r = call("terminal.reply_access", to(&p))?;
+            let action = if r["allowed"] == true { "allowed" } else { "revoked" };
+            let human = format!(
+                "{action} messages from {} to {}",
+                r["remote"].as_str().unwrap_or_default(),
+                r["terminal"].as_str().unwrap_or_default()
+            );
             Out { json: r, human }
         }
         Cmd::Send(mut p) => {
@@ -728,6 +741,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("label", "terminal.label"),
     ("keep", "terminal.keep"),
     ("send", "terminal.send"),
+    ("replies", "terminal.reply_access"),
     ("wait", "terminal.wait"),
     ("keys", "terminal.keys"),
     ("interrupt", "terminal.interrupt"),

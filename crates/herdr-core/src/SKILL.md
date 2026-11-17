@@ -112,6 +112,27 @@ default 60-second hold, but a parent configured above that
 can still outwait a child with a shorter limit. Sends to an added machine keep
 waiting while its line is alive.
 
+For an independently started remote agent to reply to this local terminal,
+grant message access here before sending it a task:
+
+```sh
+hc replies pve/t3                   # allow pve/t3 to send messages here
+hc send pve/t3 "Reply to the sender address in this message"
+hc replies pve/t3 --off             # revoke that route
+```
+
+A grant covers one remote core and terminal address and one live local terminal.
+It survives core restarts while that local terminal is live. It does not adopt
+the remote terminal or grant read, get, wait, keys or other control access.
+Without a grant, the existing parent callback rules apply. The local core needs
+the reply-access build; the remote core can use its existing `hc send`.
+Only grant a remote account you trust: its core supplies the caller address.
+
+A send with a missing or finished local sender fails with `stale_identity` before
+any text is delivered. Run Codex with `--no-daemon` in its own live terminal;
+a shared daemon can retain another session's terminal identity. Do not guess a
+replacement address or restart someone else's daemon. Plain-shell sends still work.
+
 Reports arrive tagged, for example:
 
 ```text

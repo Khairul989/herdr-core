@@ -745,3 +745,116 @@ fn a_machine_that_drops_off_is_shown_not_waited_on_and_comes_back() {
     wait_until("rohan back", || s.json(&["machine", "ls"])["machines"][0]["state"] == "connected");
     assert_eq!(addresses(&s.json(&["ls"])), ["rohan/t1"]);
 }
+
+// Exercise the SSH/headless path in isolated cores, matching a server connection.
+// Starting these first keeps the fake SSH transport from selecting GUI launchd startup.
+fn reply_sessions() -> (Session, Session) {
+    let mut rohan = Session::new();
+    let mut s = Session::new();
+    for session in [&mut rohan, &mut s] {
+        session.env.extend([("SSH_CONNECTION".into(), "test".into()), ("HC_QUIET_MS".into(), "0".into())]);
+    }
+    rohan.json(&["server", "status"]);
+    s.env.push(fake_ssh(&s, &[("rohan", &rohan)]));
+    s.json(&["server", "status"]);
+    s.json(&["machine", "add", "rohan"]);
+    (rohan, s)
+}
+
+#[test]
+fn explicit_reply_access_is_send_only_scoped_revocable_and_persistent() {
+    let (rohan, s) = reply_sessions();
+    let local = run(&s, &["sh", "-c", &script(&s, "r state=idle; cat")]);
+    let other_local = run(&s, &["sh", "-c", &script(&s, "r state=idle; cat")]);
+    let remote = run(&rohan, &["sh", "-c", &script(&rohan, "r state=idle; cat")]);
+    let other_remote = run(&rohan, &["sh", "-c", &script(&rohan, "r state=idle; cat")]);
+    wait_until("agents report", || get(&s, &local)["reported"] == true && get(&rohan, &remote)["reported"] == true);
+    let prefix = s.json(&["server", "status"])["core"]["id"].as_str().unwrap().to_owned();
+    let target = format!("{prefix}/{local}");
+    let remote_here = format!("rohan/{remote}");
+    let forward = s
+        .cmd()
+        .env("HC_TERMINAL_ID", &local)
+        .args(["--json", "send", &remote_here, "local-to-remote-control"])
+        .output()
+        .unwrap();
+    assert!(forward.status.success(), "{}", String::from_utf8_lossy(&forward.stderr));
+    wait_until("forward message appears", || text(&rohan, &remote).contains("local-to-remote-control"));
+    let reply = |who: &str, command: &str, destination: &str, text: Option<&str>| {
+        let mut c = rohan.cmd();
+        c.env("HC_TERMINAL_ID", who).args(["--json", command, destination]);
+        if let Some(text) = text {
+            c.arg(text);
+        }
+        c.output().unwrap()
+    };
+    let denied = reply(&remote, "send", &target, Some("before-grant"));
+    assert!(!denied.status.success(), "reverse sends must start denied");
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("denied"));
+    let access = |off: bool| {
+        let mut c = s.cmd();
+        c.env("HC_TERMINAL_ID", &local).args(["--json", "replies", &remote_here]);
+        if off {
+            c.arg("--off");
+        }
+        c.output().unwrap()
+    };
+    let missing = s.hc(&["--json", "replies", &remote_here]);
+    assert!(!missing.status.success(), "a plain shell cannot grant an agent's reply route");
+    let unknown = s.cmd().env("HC_TERMINAL_ID", &local).args(["--json", "replies", "rohan/t99999"]).output().unwrap();
+    assert!(!unknown.status.success(), "cannot grant an unknown remote terminal");
+    let allowed = access(false);
+    assert!(allowed.status.success(), "{}", String::from_utf8_lossy(&allowed.stderr));
+    for round in ["first-reply", "after-restart"] {
+        if round == "after-restart" {
+            s.json(&["server", "restart"]);
+            wait_until("reconnected", || s.json(&["machine", "ls"])["machines"][0]["state"] == "connected");
+        }
+        let sent = reply(&remote, "send", &target, Some(round));
+        assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
+        wait_until("reply appears", || text(&s, &local).contains(round));
+    }
+    for command in ["get", "read", "wait"] {
+        let denied = reply(&remote, command, &target, None);
+        assert!(!denied.status.success(), "grant must not allow {command}");
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("denied"));
+    }
+    for (who, destination) in [(&other_remote, target.clone()), (&remote, format!("{prefix}/{other_local}"))] {
+        let denied = reply(who, "send", &destination, Some("outside-grant"));
+        assert!(!denied.status.success(), "grant must cover only one pair");
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("denied"));
+    }
+    let revoked = access(true);
+    assert!(revoked.status.success(), "{}", String::from_utf8_lossy(&revoked.stderr));
+    let denied = reply(&remote, "send", &target, Some("after-revoke"));
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("denied"));
+    assert!(!text(&s, &local).contains("after-revoke"));
+    assert!(get(&rohan, &remote)["parent"].is_null(), "grant must not adopt the remote terminal");
+}
+
+#[test]
+fn stale_message_identity_is_rejected_before_delivery() {
+    let (_rohan, s) = reply_sessions();
+    let remote = run(&s, &["--on", "rohan", "sh", "-c", &script(&s, "r state=idle; cat")]);
+    wait_until("agent reports", || get(&s, &remote)["reported"] == true);
+    let finished = run(&s, &["sh", "-c", "exit 0"]);
+    wait_until("sender finished", || get(&s, &finished)["state"] == "finished");
+    for caller in ["t99999", finished.as_str()] {
+        let out = s
+            .cmd()
+            .env("HC_TERMINAL_ID", caller)
+            .args(["--json", "send", &remote, "must-not-arrive"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "stale sender was accepted: {caller}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("stale_identity"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(!text(&s, &remote).contains("must-not-arrive"));
+    s.json(&["send", &remote, "plain-shell-control"]);
+    wait_until("plain shell can still send", || text(&s, &remote).contains("plain-shell-control"));
+}

@@ -27,6 +27,7 @@ Terminals
 
 Talk to programs
   send <t> <text>             paste text and press enter
+  replies <machine/t> [--off] allow or revoke messages back to this local terminal
   keys <t> <keys...>          press keys: enter, esc, up, ctrl+c
   interrupt <t>               press the stop key, report what happened
   wait <t>                    wait until it stops working (--output X: until it prints X,
@@ -461,6 +462,22 @@ Options:
       --json           JSON output even in a terminal
       --lines <LINES>  Lines of history above the screen [default: 0]
   -h, --help           Print help
+```
+
+## hc replies
+
+```text
+Grant one remote terminal permission to message this local terminal (--off revokes)
+
+Usage: hc replies [OPTIONS] <TERMINAL>
+
+Arguments:
+  <TERMINAL>  Remote terminal allowed to message the calling local terminal: machine/t7
+
+Options:
+      --json  JSON output even in a terminal
+      --off   Revoke message access instead of granting it
+  -h, --help  Print help
 ```
 
 ## hc rm

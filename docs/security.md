@@ -56,6 +56,16 @@ Machine installation or update copies executable code there and restarts that se
 Forgetting a machine removes the connection here, not its remote programs or state.
 See [machines](machines.md).
 
+Reverse calls normally reach only local terminals that started work on that machine.
+`hc replies machine/t7` explicitly permits messages from that remote terminal to
+the calling live local terminal; `--off` revokes it. This adds no read, wait or
+control permission and changes no parent relationship. Grants persist with the
+local terminal's record and stop authorizing messages when it finishes. They use
+permanent core ids, so renaming a configured machine does not widen access.
+The remote core supplies the sender's terminal id: this scopes cooperative agents,
+not mutually untrusted processes sharing the same remote core or account.
+
+
 ## State and endpoints
 
 | Item | Default |
