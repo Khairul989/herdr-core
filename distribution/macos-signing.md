@@ -102,7 +102,7 @@ HC_SOURCE_BRANCH=the-local-branch
 It refuses unless the checkout is on that branch with no uncommitted changes,
 fetches and merges upstream (aborting the merge on a conflict), runs
 `scripts/install-local.sh`, and fails if the new core lacks `hc replies` (the
-local patch). It runs no tests: merge by hand and run the suite when upstream
+local patch). With `HC_PROGRESS=1` it reports each step on stderr as `progress: …` (fetch, merge with the number of new upstream commits, build, sign and install, restart, patch check); the JSON says `updated` (rebuilt or not), `merged` (upstream commits) and `from`/`to` commits. It runs no tests: merge by hand and run the suite when upstream
 touches the patched code. Without that file the update is refused. Use
 `hc update --from '/path/to/Herdr Core.app'` only with a bundle built and signed
 for the same local ID/team; that command installs and restarts Core too.

@@ -656,14 +656,36 @@ fn custom_build_updates_from_its_configured_source_checkout() {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("source-update.env"), format!("HC_SOURCE_DIR='{}'\n", source.display())).unwrap();
 
-    std::fs::write(&script, "pwd > ran\necho building >&2\necho 'hc 9.8.7'\n").unwrap();
+    // A real update: progress steps reach hc's stderr as they happen, the outcome its JSON.
+    std::fs::write(
+        &script,
+        "pwd > ran\necho building >&2\necho 'progress: Merging 2 new upstream commit(s)' >&2\n\
+         printf 'merged=2\\nfrom=aaaaaaa111\\nto=bbbbbbb222\\nrebuilt=1\\n'\necho 'hc 9.8.7'\n",
+    )
+    .unwrap();
     for args in [vec!["update"], vec!["update", "--version", "0.0.1"]] {
-        let up = s.json(&args);
-        assert_eq!((up["now"].as_str(), up["updated"].as_bool()), (Some("hc 9.8.7"), Some(true)), "{args:?}: {up}");
+        let out = s.hc(&[&["--json"], args.as_slice()].concat());
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let up: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            (up["now"].as_str(), up["updated"].as_bool(), up["merged"].as_u64()),
+            (Some("hc 9.8.7"), Some(true), Some(2)),
+            "{up}"
+        );
+        assert_eq!((up["from"].as_str(), up["to"].as_str()), (Some("aaaaaaa111"), Some("bbbbbbb222")), "{up}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.lines().any(|l| l == "progress: Merging 2 new upstream commit(s)"), "{stderr}");
+        assert!(!stderr.contains("building"), "only progress lines are passed on: {stderr}");
         let ran = std::fs::read_to_string(source.join("ran")).unwrap();
         assert_eq!(std::fs::canonicalize(ran.trim()).unwrap(), std::fs::canonicalize(&source).unwrap());
         std::fs::remove_file(source.join("ran")).unwrap();
     }
+
+    // Nothing new upstream: success, but not called an update.
+    std::fs::write(&script, "printf 'merged=0\\nfrom=bbbbbbb222\\nto=bbbbbbb222\\nrebuilt=0\\n'\necho 'hc 9.8.7'\n")
+        .unwrap();
+    let up = s.json(&["update"]);
+    assert_eq!((up["updated"].as_bool(), up["merged"].as_u64()), (Some(false), Some(0)), "{up}");
 
     std::fs::write(&script, "echo 'cargo noise' >&2\necho 'update-from-source: upstream conflicts' >&2\nexit 1\n")
         .unwrap();
