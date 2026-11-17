@@ -8,7 +8,7 @@ use crate::rpc::{self, RpcError};
 use crate::runtime::Core;
 use crate::wire::{self, Conn};
 use serde_json::Value;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -50,6 +50,11 @@ pub fn serve() -> io::Result<()> {
     // starts the next core). Waiting here would start an unwanted core after a stop.
     if !platform::try_lock(&lock) {
         return Ok(());
+    }
+    // A core of another state on this socket (another HOME or XDG_STATE_HOME):
+    // adopting would take its holders and end their programs.
+    if crate::client::connect_existing(&paths).is_some() {
+        return Err(io::Error::other(format!("another core already listens at {}", paths.socket.display())));
     }
     // Where we listen, for clients whose env points elsewhere.
     lock.set_len(0)?;
@@ -110,7 +115,7 @@ pub(crate) async fn finish(core: &Core) -> io::Result<()> {
         core.handover().await?;
     }
     if let Err(e) = core.flush_saved().await {
-        eprintln!("core: final registry flush failed: {}", e.message);
+        let _ = writeln!(io::stderr(), "core: final registry flush failed: {}", e.message);
     }
     Ok(())
 }
@@ -194,6 +199,15 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
                 handled = handling => handled,
                 () = closed(&mut read, &mut ahead) => return Ok(()),
             },
+            // A put ends only once its reply can't arrive: a caller done
+            // sending (`printf … | hc connect`) still waits for its path.
+            Some("terminal.put") => tokio::select! {
+                handled = handling => handled,
+                () = async {
+                    closed(&mut read, &mut ahead).await;
+                    platform::reply_closed(read.get_ref()).await;
+                } => return Ok(()),
+            },
             Some("terminal.send") => {
                 let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let handling = SEND_CANCELLED.scope(cancelled.clone(), handling);
@@ -238,14 +252,18 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
     let result = tokio::select! {
         result = read_frames(&core, &conn, &mut read) => result,
         _ = &mut writer => Ok(()),
+        () = conn.end.notified() => Ok(()),
         () = conn.overflowed.notified() => {
-            eprintln!("core: a client stopped reading its replies: disconnected");
+            let _ = writeln!(io::stderr(), "core: a client stopped reading its replies: disconnected");
             Ok(())
         }
     };
     core.detach(&conn, None);
     crate::remote::conn_gone(&core, &conn);
     crate::remote::peer_left(&core, &conn);
+    conn.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+    let key = crate::remote::conn_key(&conn);
+    crate::api::forget_puts(&mut core.lock(), |t| t.conn == key);
     writer.abort();
     result
 }
@@ -344,7 +362,7 @@ async fn write_frames(core: Arc<Core>, conn: Arc<Conn>, mut write: Writer) -> io
 
 async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> io::Result<()> {
     let u16_at = |p: &[u8], i: usize| u16::from_le_bytes([p[i], p[i + 1]]);
-    // Execs running for this connection by request id: they end when it
+    // Execs and puts running for this connection by request id: they end when it
     // closes, or when it gives up on one (`$/cancelRequest`).
     let mut execs = Execs::default();
     let mut sends = Sends::default();
@@ -370,8 +388,10 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
                     continue;
                 }
                 let cancelled = sends.track(&request);
+                let pending = crate::api::begin_read(conn, &request);
                 let (core, conn) = (core.clone(), conn.clone());
                 let task = tokio::spawn(async move {
+                    let _pending = pending;
                     let handled = SEND_CANCELLED.scope(cancelled, handle(&core, Some(&conn), None, &payload)).await;
                     if let Some(reply) = &handled.reply {
                         conn.with(|out| {
@@ -387,7 +407,7 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
                     }
                     handled.after(&core);
                 });
-                if request["method"] == "machine.exec" {
+                if matches!(request["method"].as_str(), Some("machine.exec" | "terminal.put")) {
                     execs.0.retain(|(_, exec)| !exec.is_finished());
                     execs.0.push((request["id"].to_string(), task.abort_handle()));
                 }

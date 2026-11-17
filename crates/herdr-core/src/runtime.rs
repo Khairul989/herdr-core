@@ -11,7 +11,7 @@ use crate::terminals::Registry;
 use crate::viewers::Viewer;
 use ghostty_vt::Terminal as Screen;
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant, SystemTime};
@@ -94,6 +94,8 @@ pub struct State {
     pub peer_lines: HashMap<String, (usize, Arc<crate::remote::Line>)>,
     /// Notes from other machines for parents here, until typed.
     pub afar_notes: HashMap<u32, Vec<String>>,
+    /// Provisional callback grants: (parent, machine) -> (runs pending, keep after failure).
+    pub afar_runs: HashMap<(u32, String), (usize, bool)>,
     /// What a machine must hear once its line is back (a parent here finished).
     pub machine_outbox: HashMap<String, Vec<serde_json::Value>>,
     /// When each holder was last reconnected to after our reading of it failed.
@@ -103,6 +105,8 @@ pub struct State {
     /// Each connected machine's terminals as seen from here, kept current by
     /// its events: machine id -> address (`rohan/t7`) -> record.
     pub mirrors: HashMap<String, std::collections::BTreeMap<String, serde_json::Value>>,
+    /// Puts arriving in pieces from other cores, by transfer handle.
+    pub puts: HashMap<String, crate::put::Transfer>,
 }
 
 pub struct Link {
@@ -351,6 +355,7 @@ impl Core {
             .filter(|t| matches!(t.reason.as_deref(), Some("holder_lost" | "stopped_by_restart")));
         self.sweep_in_background(leftovers.filter_map(|t| t.scope.clone()).collect());
         crate::exec::sweep_leftovers(&self.paths.state);
+        crate::put::sweep(&self.paths.state);
         self.prune(&mut st);
         self.save(&st);
         Ok(())
@@ -391,7 +396,11 @@ impl Core {
             welcome.login_session,
         );
         if welcome.build == build && self.login_session.is_some() && welcome.login_session.is_none() {
-            eprintln!("core: holder {} login identity unavailable; retaining build eligibility", welcome.pid);
+            let _ = writeln!(
+                io::stderr(),
+                "core: holder {} login identity unavailable; retaining build eligibility",
+                welcome.pid
+            );
         }
         if require_current && !current {
             io::Write::write_all(&mut stream, &proto::frame(proto::DRAIN, 0, &[]))?;
@@ -650,7 +659,10 @@ impl Core {
             eprintln!("core: lost the link to holder {instance}, reconnected");
             return;
         }
-        eprintln!("core: lost the link to holder {instance} for good; its terminals wait for the next core start");
+        let _ = writeln!(
+            io::stderr(),
+            "core: lost the link to holder {instance} for good; its terminals wait for the next core start"
+        );
         // Closed, so the holder sees us leave instead of waiting on a link nobody reads.
         if let Ok(ours) = ours {
             let _ = ours.shutdown(std::net::Shutdown::Both);
@@ -787,7 +799,7 @@ impl Core {
         if let Some(snapshot) = st.screens.remove(&id).and_then(|s| s.snapshot())
             && let Err(e) = write_atomic(&self.snapshot_path(id), &snapshot)
         {
-            eprintln!("core: cannot save screen of {}: {e}", crate::terminals::address(id));
+            let _ = writeln!(io::stderr(), "core: cannot save screen of {}: {e}", crate::terminals::address(id));
         }
         // `--rm`: gone now, unless its parent is waiting for the exit code.
         let rm = st.reg.terminals.get(&id).is_some_and(|t| {
@@ -824,6 +836,7 @@ impl Core {
         let Some(was) = st.reg.terminals.remove(&id) else { return };
         self.emit_from(st, "removed", id, serde_json::json!({}), Some(&was));
         let _ = std::fs::remove_file(self.snapshot_path(id));
+        crate::api::forget_puts(st, |t| t.terminal == id);
         let _ = std::fs::remove_dir_all(crate::put::dir(&self.paths.state, id));
         self.save(st);
     }
